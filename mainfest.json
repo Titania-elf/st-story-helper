@@ -1,0 +1,10 @@
+{
+    "display_name": "剧情助手",
+    "loading_order": 50,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "plugin.css",
+    "author": "titania",
+    "version": "1.0.0"
+}

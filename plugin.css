@@ -1,0 +1,223 @@
+/* plugin.css - 独立API版 */
+
+:root {
+    --sh-bg: #0b1220;
+    --sh-border: rgba(255, 255, 255, 0.15);
+    --sh-text: #dce9ff;
+    --sh-accent: #6f8df6;
+    --sh-radius: 12px;
+}
+
+.sh-panel {
+    position: fixed;
+    z-index: 20002;
+    display: none;
+    flex-direction: column;
+    top: 50% !important;
+    left: 50% !important;
+    transform: translate(-50%, -50%) !important;
+    width: 760px;
+    max-width: 90vw;
+    height: 80vh;
+    background-color: var(--sh-bg);
+    background-image: linear-gradient(180deg, rgba(30, 40, 60, 0.98), rgba(11, 18, 32, 0.99));
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid var(--sh-border);
+    border-radius: var(--sh-radius);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+    overflow: hidden;
+}
+
+.sh-header {
+    flex-shrink: 0;
+    height: 50px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 16px;
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid var(--sh-border);
+    cursor: grab;
+}
+
+.sh-title {
+    font-weight: 600;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sh-icon-btn {
+    background: none;
+    border: none;
+    color: #ccc;
+    font-size: 18px;
+    padding: 8px;
+    cursor: pointer;
+}
+
+.sh-icon-btn:hover {
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+}
+
+/* === 设置面板样式 === */
+.sh-settings-panel {
+    background: rgba(0, 0, 0, 0.5);
+    padding: 16px;
+    border-bottom: 1px solid var(--sh-border);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.sh-settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.sh-settings-group label {
+    font-size: 12px;
+    color: var(--sh-muted);
+}
+
+.sh-input {
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--sh-border);
+    color: #fff;
+    padding: 8px;
+    border-radius: 6px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.sh-hint {
+    font-size: 11px;
+    color: #666;
+}
+
+.full-width {
+    width: 100%;
+}
+
+.sh-body {
+    flex: 1;
+    overflow-y: scroll;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    padding: 16px;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+.sh-body::-webkit-scrollbar {
+    width: 8px;
+    display: block;
+}
+
+.sh-body::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.sh-body::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+}
+
+@media (min-width: 881px) {
+    .sh-body {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+    }
+}
+
+.sh-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.sh-right {
+    border-left: 1px solid rgba(255, 255, 255, 0.05);
+    padding-left: 16px;
+}
+
+.sh-textarea {
+    width: 100%;
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--sh-border);
+    border-radius: 6px;
+    color: var(--sh-text);
+    flex-shrink: 0;
+}
+
+.sh-btn {
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.sh-btn.primary {
+    background: var(--sh-accent);
+    border: none;
+    color: #000;
+    font-weight: bold;
+}
+
+.sh-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 5px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.sh-option {
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.05);
+    margin-bottom: 8px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.sh-option:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.sh-empty {
+    color: #888;
+    font-style: italic;
+    text-align: center;
+    padding: 20px;
+}
+
+@media (max-width: 880px) {
+    .sh-panel {
+        top: 10% !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        bottom: auto !important;
+        width: 95vw !important;
+        height: 75vh !important;
+        border-radius: 12px !important;
+    }
+
+    .sh-right {
+        border-left: none;
+        padding-left: 0;
+        margin-top: 10px;
+        border-top: 1px solid var(--sh-border);
+        padding-top: 20px;
+        padding-bottom: 40px;
+    }
+}
