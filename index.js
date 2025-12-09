@@ -1,5 +1,4 @@
-// index.js - 独立 API 请求版 (Stand-alone Client)
-// 完全解耦：不依赖 SillyTavern 内部 API，直接发起 fetch 请求
+// index.js - 独立 API 请求版 (带模型列表获取功能)
 
 const extensionName = "st-story-helper";
 const LS_KEY_PROMPT = 'sh_prompt';
@@ -10,21 +9,26 @@ const LS_KEY_MODEL = 'sh_api_model';
 const scriptPath = document.currentScript ? document.currentScript.src : import.meta.url;
 const extensionFolderPath = scriptPath.substring(0, scriptPath.lastIndexOf('/'));
 
-console.log(`[${extensionName}] 插件启动 (Direct Client Mode)`);
+console.log(`[${extensionName}] 插件启动 (Direct Client Mode + Model List)`);
 
 // -------------------------------------------------------
-// 1. 核心生成逻辑 (直接 Fetch)
+// 1. 核心生成逻辑
 // -------------------------------------------------------
 
 async function sendToModel(fullPrompt) {
-    // 读取设置
     const apiUrl = localStorage.getItem(LS_KEY_API_URL);
     const apiKey = localStorage.getItem(LS_KEY_API_KEY);
     const model = localStorage.getItem(LS_KEY_MODEL);
 
     if (!apiUrl) throw new Error("请先点击右上角 ⚙️ 设置 API 地址！");
 
-    // 构造标准的 OpenAI 兼容格式
+    // 智能补全 Chat 路径
+    let endpoint = apiUrl;
+    if (!endpoint.endsWith('/chat/completions') && !endpoint.endsWith('/generate')) {
+         if (endpoint.endsWith('/')) endpoint += 'chat/completions';
+         else endpoint += '/chat/completions';
+    }
+
     const payload = {
         model: model || "gpt-3.5-turbo",
         messages: [
@@ -35,22 +39,10 @@ async function sendToModel(fullPrompt) {
         stream: false
     };
 
-    // 自动补全 /chat/completions 如果用户只填了 base url
-    let endpoint = apiUrl;
-    if (!endpoint.endsWith('/chat/completions') && !endpoint.endsWith('/generate')) {
-         // 简单的判断：如果看起来像 base URL，就拼上 chat completion
-         if (endpoint.endsWith('/')) endpoint += 'chat/completions';
-         else endpoint += '/chat/completions';
-    }
-
     console.log(`[${extensionName}] 发送请求到: ${endpoint}`);
 
-    const headers = {
-        "Content-Type": "application/json"
-    };
-    if (apiKey) {
-        headers["Authorization"] = `Bearer ${apiKey}`;
-    }
+    const headers = { "Content-Type": "application/json" };
+    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
     const response = await fetch(endpoint, {
         method: "POST",
@@ -64,11 +56,9 @@ async function sendToModel(fullPrompt) {
 
     const data = await response.json();
     
-    // 解析 OpenAI 格式
     if (data.choices && data.choices[0] && data.choices[0].message) {
         return data.choices[0].message.content;
     }
-    // 解析其他格式
     if (data.choices && data.choices[0] && data.choices[0].text) return data.choices[0].text;
     if (data.text) return data.text;
     
@@ -76,7 +66,83 @@ async function sendToModel(fullPrompt) {
 }
 
 // -------------------------------------------------------
-// 2. 辅助工具
+// 2. 新增：获取模型列表功能
+// -------------------------------------------------------
+
+async function fetchModelList() {
+    const apiUrl = $("#sh-api-url").val().trim(); // 从输入框实时获取
+    const apiKey = $("#sh-api-key").val().trim();
+    const refreshBtn = $("#sh-refresh-models");
+    const dataList = $("#sh-model-options");
+
+    if (!apiUrl) return alert("请先填写 API 地址！");
+
+    // UI 状态更新
+    refreshBtn.text("...").prop("disabled", true);
+    
+    try {
+        // 推导 /v1/models 地址
+        // 如果用户填的是 .../chat/completions，我们需要截取掉后面，换成 /models
+        let modelsEndpoint = apiUrl;
+        
+        if (modelsEndpoint.includes("/chat/completions")) {
+            modelsEndpoint = modelsEndpoint.replace("/chat/completions", "/models");
+        } else if (modelsEndpoint.endsWith("/")) {
+            modelsEndpoint += "models";
+        } else {
+            // 简单粗暴猜测
+            modelsEndpoint += "/models";
+        }
+
+        console.log(`[${extensionName}] 获取模型列表: ${modelsEndpoint}`);
+
+        const headers = { "Content-Type": "application/json" };
+        if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+        const response = await fetch(modelsEndpoint, {
+            method: "GET",
+            headers: headers
+        });
+
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+        const data = await response.json();
+        
+        // 解析标准 OpenAI 格式: { data: [ { id: "model-name", ... }, ... ] }
+        let models = [];
+        if (data.data && Array.isArray(data.data)) {
+            models = data.data.map(item => item.id);
+        } else if (Array.isArray(data)) {
+            // 某些非标接口直接返回数组
+            models = data.map(item => item.id || item);
+        }
+
+        if (models.length === 0) throw new Error("未找到模型数据");
+
+        // 排序并填充 datalist
+        models.sort();
+        dataList.empty();
+        models.forEach(m => {
+            dataList.append(`<option value="${m}">`);
+        });
+
+        alert(`成功加载 ${models.length} 个模型！请点击模型输入框选择。`);
+        
+        // 如果当前输入框是空的，自动填入第一个
+        if (!$("#sh-api-model").val()) {
+            $("#sh-api-model").val(models[0]);
+        }
+
+    } catch (err) {
+        console.error("获取模型失败", err);
+        alert(`获取失败: ${err.message}\n请检查 API 地址是否支持 /models 路径，或手动输入模型名称。`);
+    } finally {
+        refreshBtn.text("↻").prop("disabled", false);
+    }
+}
+
+// -------------------------------------------------------
+// 3. 辅助工具
 // -------------------------------------------------------
 
 function escapeHtml(s) {
@@ -166,7 +232,7 @@ function parseModelOptions(text) {
 }
 
 // -------------------------------------------------------
-// 3. UI 交互
+// 4. UI 交互
 // -------------------------------------------------------
 
 function renderOptionsToPanel(optionTexts) {
@@ -190,17 +256,21 @@ function renderOptionsToPanel(optionTexts) {
 }
 
 function bindPanelEvents() {
-    // 1. 加载所有设置
     const savedPrompt = localStorage.getItem(LS_KEY_PROMPT);
     if (savedPrompt) $("#sh-prompt").val(savedPrompt);
     
+    // 加载已保存的设置
     $("#sh-api-url").val(localStorage.getItem(LS_KEY_API_URL) || '');
     $("#sh-api-key").val(localStorage.getItem(LS_KEY_API_KEY) || '');
     $("#sh-api-model").val(localStorage.getItem(LS_KEY_MODEL) || '');
 
-    // 2. 绑定设置按钮
     $("#sh-settings-toggle").off().on("click", () => {
         $("#sh-settings-panel").slideToggle(200);
+    });
+
+    // 绑定刷新模型按钮
+    $("#sh-refresh-models").off().on("click", () => {
+        fetchModelList();
     });
 
     $("#sh-save-settings").off().on("click", () => {
@@ -211,7 +281,6 @@ function bindPanelEvents() {
         $("#sh-settings-panel").slideUp(200);
     });
 
-    // 3. 绑定 Prompt 保存
     $("#sh-save-prompt").off().on("click", () => {
         localStorage.setItem(LS_KEY_PROMPT, $("#sh-prompt").val());
         alert("提示词已保存");
@@ -221,7 +290,6 @@ function bindPanelEvents() {
         $("#sh-prompt").val("请基于上文，写出 4 种不同的剧情后续发展（每条 30-50 字）。");
     });
 
-    // 4. 生成按钮
     $("#sh-generate").off().on("click", async () => {
         const promptText = $("#sh-prompt").val().trim();
         if (!promptText) return alert('请先填写提示词！');
@@ -261,7 +329,7 @@ function bindPanelEvents() {
 }
 
 // -------------------------------------------------------
-// 4. 加载
+// 5. 加载
 // -------------------------------------------------------
 
 function injectStyles() {
