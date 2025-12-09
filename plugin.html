@@ -26,16 +26,17 @@
         </div>
         
         <!-- 修改部分开始：带刷新按钮的模型选择器 -->
-        <div class="sh-settings-group">
-            <label>模型名称 (Model)</label>
-            <div style="display:flex; gap:6px;">
-                <!-- list 属性绑定到了下面的 datalist -->
-                <input type="text" id="sh-api-model" class="sh-input" placeholder="gpt-3.5-turbo" list="sh-model-options" style="flex:1;">
-                <button id="sh-refresh-models" class="sh-btn secondary" style="padding:0 10px; min-width:40px; display:flex; align-items:center; justify-content:center;" title="获取模型列表">↻</button>
-            </div>
-            <!-- 这是一个隐藏的列表容器，用于存储获取到的模型 -->
-            <datalist id="sh-model-options"></datalist>
-        </div>
+        <!-- plugin.html 修改片段：模型名称部分 -->
+<div class="sh-settings-group">
+    <label>模型名称 (Model)</label>
+    <div style="display:flex; gap:6px;">
+        <!-- 改为 select 标签，实现标准的不可编辑下拉框 -->
+        <select id="sh-api-model" class="sh-input" style="flex:1; cursor:pointer;">
+            <option value="gpt-3.5-turbo">gpt-3.5-turbo (默认)</option>
+        </select>
+        <button id="sh-refresh-models" class="sh-btn secondary" style="padding:0 10px; min-width:40px; display:flex; align-items:center; justify-content:center;" title="获取模型列表">↻</button>
+    </div>
+</div>
         <!-- 修改部分结束 -->
 
         <button id="sh-save-settings" class="sh-btn primary full-width">保存连接设置</button>
@@ -79,3 +80,4 @@
         </aside>
     </main>
 </div>
+
