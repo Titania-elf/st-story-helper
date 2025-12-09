@@ -1,9 +1,9 @@
-<!-- plugin.html - 剧情助手 (独立 API 版) -->
+<!-- plugin.html - 剧情助手 (独立 API 版 - 带模型列表) -->
 <div id="st-story-helper" class="sh-panel" role="dialog" aria-label="剧情助手">
     <header class="sh-header">
         <div class="sh-title">
             <svg class="sh-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M9 18h6M10 21h4M12 2a6 6 0 0 0-4 10c0 2 1 3 1 4h6c0-1 1-2 1-4a6 6 0 0 0-4-10z" />
+                <path d="M9 18h6M10 21h4M12 2a6 6 0 0 0-4 10c0 2 1 3 1 4h6c0-1 1-2 1-4a6 6 0 0 0-4-10z"/>
             </svg>
             <span>剧情助手 (独立版)</span>
         </div>
@@ -24,10 +24,20 @@
             <label>API Key</label>
             <input type="password" id="sh-api-key" class="sh-input" placeholder="sk-...">
         </div>
+        
+        <!-- 修改部分开始：带刷新按钮的模型选择器 -->
         <div class="sh-settings-group">
             <label>模型名称 (Model)</label>
-            <input type="text" id="sh-api-model" class="sh-input" placeholder="gpt-3.5-turbo">
+            <div style="display:flex; gap:6px;">
+                <!-- list 属性绑定到了下面的 datalist -->
+                <input type="text" id="sh-api-model" class="sh-input" placeholder="gpt-3.5-turbo" list="sh-model-options" style="flex:1;">
+                <button id="sh-refresh-models" class="sh-btn secondary" style="padding:0 10px; min-width:40px; display:flex; align-items:center; justify-content:center;" title="获取模型列表">↻</button>
+            </div>
+            <!-- 这是一个隐藏的列表容器，用于存储获取到的模型 -->
+            <datalist id="sh-model-options"></datalist>
         </div>
+        <!-- 修改部分结束 -->
+
         <button id="sh-save-settings" class="sh-btn primary full-width">保存连接设置</button>
     </div>
 
@@ -35,7 +45,7 @@
         <section class="sh-section sh-left">
             <label class="sh-label">自定义提示词</label>
             <textarea id="sh-prompt" class="sh-textarea" placeholder="在此输入 prompt..."></textarea>
-
+            
             <div class="sh-row">
                 <button id="sh-save-prompt" class="sh-btn ghost">保存提示词</button>
                 <button id="sh-load-sample" class="sh-btn ghost">载入示例</button>
