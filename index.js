@@ -1,4 +1,4 @@
-// index.js - 独立 API 请求版 (带模型列表获取功能)
+// index.js - 独立 API 请求版 (Select 下拉框适配版)
 
 const extensionName = "st-story-helper";
 const LS_KEY_PROMPT = 'sh_prompt';
@@ -9,7 +9,7 @@ const LS_KEY_MODEL = 'sh_api_model';
 const scriptPath = document.currentScript ? document.currentScript.src : import.meta.url;
 const extensionFolderPath = scriptPath.substring(0, scriptPath.lastIndexOf('/'));
 
-console.log(`[${extensionName}] 插件启动 (Direct Client Mode + Model List)`);
+console.log(`[${extensionName}] 插件启动 (Select UI Mode)`);
 
 // -------------------------------------------------------
 // 1. 核心生成逻辑
@@ -22,7 +22,6 @@ async function sendToModel(fullPrompt) {
 
     if (!apiUrl) throw new Error("请先点击右上角 ⚙️ 设置 API 地址！");
 
-    // 智能补全 Chat 路径
     let endpoint = apiUrl;
     if (!endpoint.endsWith('/chat/completions') && !endpoint.endsWith('/generate')) {
          if (endpoint.endsWith('/')) endpoint += 'chat/completions';
@@ -66,31 +65,27 @@ async function sendToModel(fullPrompt) {
 }
 
 // -------------------------------------------------------
-// 2. 新增：获取模型列表功能
+// 2. 获取模型列表功能 (适配 Select)
 // -------------------------------------------------------
 
 async function fetchModelList() {
-    const apiUrl = $("#sh-api-url").val().trim(); // 从输入框实时获取
+    const apiUrl = $("#sh-api-url").val().trim();
     const apiKey = $("#sh-api-key").val().trim();
     const refreshBtn = $("#sh-refresh-models");
-    const dataList = $("#sh-model-options");
+    // 改动：直接操作 select 元素
+    const selectBox = $("#sh-api-model");
 
     if (!apiUrl) return alert("请先填写 API 地址！");
 
-    // UI 状态更新
     refreshBtn.text("...").prop("disabled", true);
     
     try {
-        // 推导 /v1/models 地址
-        // 如果用户填的是 .../chat/completions，我们需要截取掉后面，换成 /models
         let modelsEndpoint = apiUrl;
-        
         if (modelsEndpoint.includes("/chat/completions")) {
             modelsEndpoint = modelsEndpoint.replace("/chat/completions", "/models");
         } else if (modelsEndpoint.endsWith("/")) {
             modelsEndpoint += "models";
         } else {
-            // 简单粗暴猜测
             modelsEndpoint += "/models";
         }
 
@@ -108,34 +103,38 @@ async function fetchModelList() {
 
         const data = await response.json();
         
-        // 解析标准 OpenAI 格式: { data: [ { id: "model-name", ... }, ... ] }
         let models = [];
         if (data.data && Array.isArray(data.data)) {
             models = data.data.map(item => item.id);
         } else if (Array.isArray(data)) {
-            // 某些非标接口直接返回数组
             models = data.map(item => item.id || item);
         }
 
         if (models.length === 0) throw new Error("未找到模型数据");
 
-        // 排序并填充 datalist
         models.sort();
-        dataList.empty();
+        
+        // 改动：清空 select 并重新填充 option
+        selectBox.empty();
         models.forEach(m => {
-            dataList.append(`<option value="${m}">`);
+            selectBox.append(`<option value="${m}">${m}</option>`);
         });
 
-        alert(`成功加载 ${models.length} 个模型！请点击模型输入框选择。`);
-        
-        // 如果当前输入框是空的，自动填入第一个
-        if (!$("#sh-api-model").val()) {
-            $("#sh-api-model").val(models[0]);
+        // 尝试保持当前选择，或者选中第一个
+        const currentModel = localStorage.getItem(LS_KEY_MODEL);
+        if (currentModel && models.includes(currentModel)) {
+            selectBox.val(currentModel);
+        } else {
+            selectBox.val(models[0]);
+            // 自动保存新选中的模型
+            localStorage.setItem(LS_KEY_MODEL, models[0]);
         }
+
+        alert(`刷新成功！已加载 ${models.length} 个模型。`);
 
     } catch (err) {
         console.error("获取模型失败", err);
-        alert(`获取失败: ${err.message}\n请检查 API 地址是否支持 /models 路径，或手动输入模型名称。`);
+        alert(`获取失败: ${err.message}\n请检查 API 地址是否正确。`);
     } finally {
         refreshBtn.text("↻").prop("disabled", false);
     }
@@ -231,10 +230,6 @@ function parseModelOptions(text) {
     return items.slice(0, 4);
 }
 
-// -------------------------------------------------------
-// 4. UI 交互
-// -------------------------------------------------------
-
 function renderOptionsToPanel(optionTexts) {
     const optionsWrap = document.getElementById('sh-options');
     optionsWrap.innerHTML = '';
@@ -255,28 +250,44 @@ function renderOptionsToPanel(optionTexts) {
     });
 }
 
+// -------------------------------------------------------
+// 4. UI 绑定
+// -------------------------------------------------------
+
 function bindPanelEvents() {
     const savedPrompt = localStorage.getItem(LS_KEY_PROMPT);
     if (savedPrompt) $("#sh-prompt").val(savedPrompt);
     
-    // 加载已保存的设置
+    // 加载设置
     $("#sh-api-url").val(localStorage.getItem(LS_KEY_API_URL) || '');
     $("#sh-api-key").val(localStorage.getItem(LS_KEY_API_KEY) || '');
-    $("#sh-api-model").val(localStorage.getItem(LS_KEY_MODEL) || '');
+    
+    // 改动：初始化 Select
+    const savedModel = localStorage.getItem(LS_KEY_MODEL) || 'gpt-3.5-turbo';
+    const selectBox = $("#sh-api-model");
+    
+    // 初始化时，不管列表有没有获取，先保证有一个选项是当前的保存值
+    selectBox.empty(); 
+    selectBox.append(`<option value="${savedModel}">${savedModel}</option>`);
+    selectBox.val(savedModel);
 
     $("#sh-settings-toggle").off().on("click", () => {
         $("#sh-settings-panel").slideToggle(200);
     });
 
-    // 绑定刷新模型按钮
     $("#sh-refresh-models").off().on("click", () => {
         fetchModelList();
+    });
+
+    // 改动：监听 select 变化，实时保存模型选择
+    $("#sh-api-model").off().on("change", function() {
+        localStorage.setItem(LS_KEY_MODEL, $(this).val());
     });
 
     $("#sh-save-settings").off().on("click", () => {
         localStorage.setItem(LS_KEY_API_URL, $("#sh-api-url").val().trim());
         localStorage.setItem(LS_KEY_API_KEY, $("#sh-api-key").val().trim());
-        localStorage.setItem(LS_KEY_MODEL, $("#sh-api-model").val().trim());
+        localStorage.setItem(LS_KEY_MODEL, $("#sh-api-model").val().trim()); // 这里的 .val() 对 select 也有效
         alert("设置已保存！");
         $("#sh-settings-panel").slideUp(200);
     });
@@ -370,7 +381,6 @@ function createToolbarButton() {
     });
 }
 
-// 启动
 jQuery(async () => {
     setTimeout(async () => {
         injectStyles();
