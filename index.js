@@ -1,388 +1,416 @@
-// index.js - 遵循 ST 标准流版
-// 逻辑：前端 -> ST 后端 (代理) -> OpenAI/反代 -> ST 后端 -> 前端
+// plugin.js - 剧情助手 (独立 API 版) - 完整实现
 
-const extensionName = "st-story-helper";
-const LS_KEY = 'story-helper-prompt';
-
-// 自动获取路径
-const scriptPath = document.currentScript ? document.currentScript.src : import.meta.url;
-const extensionFolderPath = scriptPath.substring(0, scriptPath.lastIndexOf('/'));
-
-console.log(`[${extensionName}] 插件启动 - 标准代理模式`);
-
-// -------------------------------------------------------
-// 1. 核心生成逻辑 (利用 ST 后端代理)
-// -------------------------------------------------------
-
-/**
- * 获取 CSRF Token (最关键的一步，必须拿到这个才能调用 ST 后端)
- */
-function getCsrfToken() {
-    // 1. 从 Meta 标签拿 (新版 ST 标准)
-    let token = $('meta[name="csrf-token"]').attr('content');
-    
-    // 2. 从全局变量拿 (旧版 ST)
-    if (!token && window.csrfToken) token = window.csrfToken;
-    
-    // 3. 从 jQuery 全局配置拿
-    if (!token && $.ajaxSettings && $.ajaxSettings.headers) {
-        token = $.ajaxSettings.headers['X-CSRF-Token'];
-    }
-    
-    return token;
-}
-
-/**
- * 发送请求
- * 核心思想：我不直接连 OpenAI，我让 ST 后端帮我连
- */
-async function sendToModel(fullPrompt) {
-    console.log(`[${extensionName}] 正在委托 ST 后端生成...`);
-
-    // 1. 确保 CSRF Token 存在
-    const token = getCsrfToken();
-    if (!token) {
-        console.warn("⚠️ 未找到 CSRF Token，请求可能会被 ST 拒绝 (403)。");
-    }
-
-    // 2. 构造请求参数
-    // quiet: true 是核心。这意味着 "静默生成"，ST 不会把它显示在聊天框里，
-    // 而是直接把结果返回给调用者（也就是我们的插件）。
-    // 并且 ST 会自动使用你当前在 "API设置" 里填写的反代地址和 Key。
-    const payload = {
-        prompt: fullPrompt,
-        quiet: true,           // 关键：静默模式
-        use_story: false,      // 不受当前聊天记录干扰（我们已经在 prompt 里手动加了）
-        use_memory: false,
-        use_authors_note: false,
-        use_world_info: false
-    };
-
-    // 3. 使用 jQuery.ajax 发送
-    // 为什么要用 jQuery？因为 ST 也是用的 jQuery，它会自动处理 Cookie 和 Session。
-    return new Promise((resolve, reject) => {
-        $.ajax({
-            url: '/api/generate',
-            type: 'POST',
-            contentType: 'application/json',
-            data: JSON.stringify(payload),
-            headers: {
-                'X-CSRF-Token': token // 必须带上这个
-            },
-            success: function(data) {
-                console.log(`[${extensionName}] ST 后端返回成功:`, data);
-                
-                // 解析各种可能的返回格式
-                // 1. 文本补全模式返回结构
-                if (data.results && data.results[0]) {
-                    resolve(data.results[0].text);
-                    return;
-                }
-                // 2. 聊天补全模式 (OpenAI/Claude) 返回结构
-                if (data.choices && data.choices[0]) {
-                    const content = data.choices[0].message?.content || data.choices[0].text;
-                    resolve(content);
-                    return;
-                }
-                // 3. 简单结构
-                if (data.text) {
-                    resolve(data.text);
-                    return;
-                }
-                
-                resolve(JSON.stringify(data));
-            },
-            error: function(xhr, status, error) {
-                console.error(`[${extensionName}] ST 后端报错:`, status, error);
-                
-                let errMsg = "未知错误";
-                if (xhr.status === 403) errMsg = "403 禁止访问 (CSRF 校验失败，请刷新页面)";
-                else if (xhr.status === 500) errMsg = "500 服务器错误 (请检查 ST 控制台日志)";
-                else if (xhr.responseJSON && xhr.responseJSON.error) {
-                    errMsg = xhr.responseJSON.error.message || xhr.responseJSON.error;
-                }
-                
-                reject(new Error(errMsg));
-            }
-        });
-    });
-}
-
-// -------------------------------------------------------
-// 2. 辅助工具
-// -------------------------------------------------------
-
-function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
-
-function safeText(node) {
-    return node ? (node.textContent || node.innerText || '').trim() : '';
-}
-
-function findSTInput() {
-    return document.querySelector('#send_textarea') || 
-           document.querySelector('textarea[aria-label="Message"]');
-}
-
-function writeToSTInput(text) {
-    const stInput = findSTInput();
-    if (stInput) {
-        // 模拟 React 输入事件
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-        nativeInputValueSetter.call(stInput, text);
-        stInput.dispatchEvent(new Event('input', { bubbles: true }));
-        stInput.dispatchEvent(new Event('change', { bubbles: true }));
-        stInput.focus();
-        return true;
-    }
-    return false;
-}
-
-// 提取上下文
-function extractRecentChatHistory(maxItems = 20) {
-    const chatContainer = document.querySelector('#chat');
-    if (!chatContainer) return [];
-    
-    // 只获取显示的文本
-    const messageNodes = Array.from(chatContainer.querySelectorAll('.mes')).filter(n => n.style.display !== 'none');
-    const results = [];
-
-    for (let i = messageNodes.length - 1; i >= 0 && results.length < maxItems; i--) {
-        const node = messageNodes[i];
-        let role = 'user';
-        if (node.getAttribute('is_user') === 'false' || node.classList.contains('not_user')) {
-            role = 'assistant';
-        }
-
-        const textNode = node.querySelector('.mes_text');
-        if (textNode) {
-            // 克隆以避免破坏 DOM
-            const clone = textNode.cloneNode(true);
-            // 移除干扰元素
-            clone.querySelectorAll('.mes_buttons, .timestamp, .mes_edit_clone, .conf_div').forEach(b => b.remove());
-            let text = clone.innerText.trim();
-            // 清理 deepseek 思考过程
-            text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-            
-            if (text) results.push({ role, text });
-        }
-    }
-    return results.reverse();
-}
-
-function buildModelPayload(userPrompt, historyItems) {
-    const historyText = historyItems.map(it => `${it.role.toUpperCase()}: ${it.text}`).join('\n');
-    return `
-[Context]
-${historyText}
-
-[Instruction]
-${userPrompt.trim()}
-
-[Format]
-Output exactly 4 distinct plot options numbered 1 to 4.
-1. ...
-2. ...
-3. ...
-4. ...
-`.trim();
-}
-
-function parseModelOptions(text) {
-    if (!text) return [];
-    text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-    
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    const items = [];
-    let current = null;
-    const indexRegex = /^([①1-9]+)[\.\)\、\s]+(.*)$/;
-
-    for (const line of lines) {
-        const m = line.match(indexRegex);
-        if (m) {
-            if (current) items.push(current.trim());
-            current = m[2];
-        } else {
-            if (current) current += ' ' + line;
-        }
-    }
-    if (current) items.push(current.trim());
-
-    if (items.length < 2) return text.split(/\n\s*\n/).filter(p => p.length > 5).slice(0, 4);
-    return items.slice(0, 4);
-}
-
-// -------------------------------------------------------
-// 3. UI 交互
-// -------------------------------------------------------
-
-function renderOptionsToPanel(optionTexts) {
-    const optionsWrap = document.getElementById('sh-options');
-    if (!optionsWrap) return;
-    optionsWrap.innerHTML = '';
-    
-    if (!optionTexts || optionTexts.length === 0) {
-        optionsWrap.innerHTML = '<div class="sh-empty">未能解析出选项。</div>';
-        return;
-    }
-
-    optionTexts.forEach((txt, idx) => {
-        const btn = document.createElement('div');
-        btn.className = 'sh-option';
-        btn.innerHTML = `<strong style="color:var(--sh-accent-2);margin-right:6px;">${idx + 1}.</strong>${escapeHtml(txt)}`;
+class StoryHelperPlugin {
+    constructor() {
+        this.apiConfig = {
+            url: '',
+            key: '',
+            model: 'gpt-3.5-turbo'
+        };
+        this.promptHistory = [];
+        this.currentResponse = null;
+        this.isGenerating = false;
         
-        btn.addEventListener('click', () => {
-            const success = writeToSTInput(txt);
-            const preview = document.getElementById('sh-target-preview');
-            if (preview) preview.value = txt;
-        });
-        optionsWrap.appendChild(btn);
-    });
-}
+        this.init();
+    }
 
-function bindPanelEvents() {
-    const promptEl = document.getElementById('sh-prompt');
-    const ctxEl = document.getElementById('sh-context');
-    const genStatus = document.getElementById('sh-gen-status');
-    const savedPrompt = localStorage.getItem(LS_KEY);
-    
-    if (savedPrompt && promptEl) promptEl.value = savedPrompt;
-
-    $("#sh-save-prompt").off().on("click", () => {
-        if (promptEl) {
-            localStorage.setItem(LS_KEY, promptEl.value);
-            alert("已保存");
+    init() {
+        // 等待DOM加载完成
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => this.setupEventListeners());
+        } else {
+            this.setupEventListeners();
         }
-    });
+        
+        // 加载保存的配置
+        this.loadSavedConfig();
+        this.loadSavedPrompt();
+    }
 
-    // 隐藏之前的设置按钮，因为现在自动使用 ST 连接
-    $("#sh-settings-toggle").hide();
+    setupEventListeners() {
+        // 设置面板切换
+        document.getElementById('sh-settings-toggle').addEventListener('click', () => {
+            const panel = document.getElementById('sh-settings-panel');
+            const isVisible = panel.style.display !== 'none';
+            panel.style.display = isVisible ? 'none' : 'block';
+        });
 
-    $("#sh-load-sample").off().on("click", () => {
-        if (promptEl) promptEl.value = "请基于上文，写出 4 种不同的剧情后续发展（每条 30-50 字）。";
-    });
+        // 关闭按钮
+        document.getElementById('sh-close').addEventListener('click', () => {
+            document.getElementById('st-story-helper').style.display = 'none';
+        });
 
-    $("#sh-generate").off().on("click", async () => {
-        const promptText = promptEl ? promptEl.value.trim() : '';
-        if (!promptText) return alert('请先填写提示词！');
+        // 保存设置
+        document.getElementById('sh-save-settings').addEventListener('click', () => {
+            this.saveApiConfig();
+        });
 
-        if (genStatus) genStatus.textContent = '请求中...';
-        $("#sh-options").html('<div class="sh-empty"><span class="sh-spinner">⏳</span> 正在委托 ST 后台生成...</div>');
+        // 保存提示词
+        document.getElementById('sh-save-prompt').addEventListener('click', () => {
+            this.savePrompt();
+        });
+
+        // 载入示例
+        document.getElementById('sh-load-sample').addEventListener('click', () => {
+            this.loadSamplePrompt();
+        });
+
+        // 生成按钮
+        document.getElementById('sh-generate').addEventListener('click', () => {
+            this.generateStory();
+        });
+
+        // 填入输入框
+        document.getElementById('sh-apply-to-st').addEventListener('click', () => {
+            this.applyToST();
+        });
+
+        // 清空预览
+        document.getElementById('sh-clear-preview').addEventListener('click', () => {
+            document.getElementById('sh-target-preview').value = '';
+        });
+    }
+
+    // 加载保存的配置
+    loadSavedConfig() {
+        try {
+            const saved = localStorage.getItem('story_helper_config');
+            if (saved) {
+                this.apiConfig = JSON.parse(saved);
+                document.getElementById('sh-api-url').value = this.apiConfig.url || '';
+                document.getElementById('sh-api-key').value = this.apiConfig.key || '';
+                document.getElementById('sh-api-model').value = this.apiConfig.model || 'gpt-3.5-turbo';
+            }
+        } catch (e) {
+            console.warn('无法加载保存的配置:', e);
+        }
+    }
+
+    // 保存API配置
+    saveApiConfig() {
+        const url = document.getElementById('sh-api-url').value.trim();
+        const key = document.getElementById('sh-api-key').value.trim();
+        const model = document.getElementById('sh-api-model').value.trim();
+
+        if (!url || !key) {
+            this.updateStatus('sh-prompt-status', '请填写完整的API配置信息', 'error');
+            return;
+        }
+
+        this.apiConfig = { url, key, model };
+        
+        try {
+            localStorage.setItem('story_helper_config', JSON.stringify(this.apiConfig));
+            this.updateStatus('sh-prompt-status', '配置保存成功', 'success');
+        } catch (e) {
+            this.updateStatus('sh-prompt-status', '配置保存失败: ' + e.message, 'error');
+        }
+    }
+
+    // 加载保存的提示词
+    loadSavedPrompt() {
+        try {
+            const saved = localStorage.getItem('story_helper_prompt');
+            if (saved) {
+                document.getElementById('sh-prompt').value = saved;
+            }
+        } catch (e) {
+            console.warn('无法加载保存的提示词:', e);
+        }
+    }
+
+    // 保存提示词
+    savePrompt() {
+        const prompt = document.getElementById('sh-prompt').value;
+        try {
+            localStorage.setItem('story_helper_prompt', prompt);
+            this.updateStatus('sh-prompt-status', '提示词保存成功', 'success');
+        } catch (e) {
+            this.updateStatus('sh-prompt-status', '提示词保存失败: ' + e.message, 'error');
+        }
+    }
+
+    // 载入示例提示词
+    loadSamplePrompt() {
+        const samplePrompt = `请根据以下上下文生成一个引人入胜的剧情走向：
+
+上下文：
+{{context}}
+
+要求：
+1. 剧情发展要合理且有逻辑
+2. 保持故事的连贯性
+3. 可以适当增加戏剧冲突
+4. 字数控制在200-300字
+
+生成的剧情：`;
+        
+        document.getElementById('sh-prompt').value = samplePrompt;
+        this.updateStatus('sh-prompt-status', '示例提示词已载入', 'info');
+    }
+
+    // 更新状态显示
+    updateStatus(elementId, message, type = 'info') {
+        const element = document.getElementById(elementId);
+        element.textContent = message;
+        element.className = `sh-note ${type}`;
+        
+        // 3秒后清除状态消息
+        setTimeout(() => {
+            if (element.textContent === message) {
+                element.textContent = '';
+                element.className = 'sh-note';
+            }
+        }, 3000);
+    }
+
+    // 获取上下文
+    async getContext() {
+        const contextInput = document.getElementById('sh-context').value.trim();
+        if (contextInput) {
+            return contextInput;
+        }
+
+        // 尝试从SillyTavern获取最近的聊天记录
+        try {
+            // 这里假设可以通过SillyTavern的API获取聊天记录
+            if (window.SB && window.SB.chat) {
+                // 获取最近几条消息作为上下文
+                const chat = window.SB.chat;
+                let context = '';
+                
+                // 获取最近的聊天消息
+                if (Array.isArray(chat)) {
+                    const recentMessages = chat.slice(-5); // 获取最后5条消息
+                    context = recentMessages.map(msg => 
+                        `${msg.name || 'Unknown'}: ${msg.mes || ''}`
+                    ).join('\n');
+                }
+                
+                return context || '暂无聊天记录';
+            }
+        } catch (e) {
+            console.warn('无法获取聊天记录作为上下文:', e);
+        }
+        
+        return '暂无聊天记录';
+    }
+
+    // 生成故事
+    async generateStory() {
+        if (this.isGenerating) {
+            this.updateStatus('sh-gen-status', '正在生成中，请稍候...', 'warning');
+            return;
+        }
+
+        const prompt = document.getElementById('sh-prompt').value.trim();
+        if (!prompt) {
+            this.updateStatus('sh-gen-status', '请先输入提示词', 'error');
+            return;
+        }
+
+        if (!this.apiConfig.url || !this.apiConfig.key) {
+            this.updateStatus('sh-gen-status', '请先配置API信息', 'error');
+            return;
+        }
+
+        this.isGenerating = true;
+        this.updateStatus('sh-gen-status', '生成中...', 'info');
 
         try {
-            let historyItems = [];
-            const manualCtx = ctxEl ? ctxEl.value.trim() : '';
-            if (manualCtx) {
-                historyItems = [{ role: 'user', text: manualCtx }];
+            const context = await this.getContext();
+            const finalPrompt = prompt.replace('{{context}}', context);
+
+            // 构建API请求
+            const requestBody = {
+                model: this.apiConfig.model || 'gpt-3.5-turbo',
+                messages: [
+                    { role: 'user', content: finalPrompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 500
+            };
+
+            // 通过SillyTavern后端代理发送请求
+            const response = await this.callSillyTavernAPI(requestBody);
+            
+            if (response && response.choices && response.choices.length > 0) {
+                const generatedText = response.choices[0].message.content;
+                this.currentResponse = generatedText;
+                
+                // 更新预览区域
+                document.getElementById('sh-target-preview').value = generatedText;
+                this.updateStatus('sh-gen-status', '生成成功', 'success');
+                
+                // 更新选项区域
+                this.updateOptions(generatedText);
             } else {
-                historyItems = extractRecentChatHistory(15);
+                throw new Error('API返回格式不正确');
+            }
+        } catch (error) {
+            console.error('生成失败:', error);
+            this.updateStatus('sh-gen-status', `生成失败: ${error.message}`, 'error');
+        } finally {
+            this.isGenerating = false;
+        }
+    }
+
+    // 通过SillyTavern后端代理调用API
+    async callSillyTavernAPI(requestBody) {
+        // 构建符合SillyTavern后端代理格式的请求
+        const proxyRequest = {
+            url: this.apiConfig.url,
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.apiConfig.key}`
+            },
+            method: 'POST',
+            body: requestBody
+        };
+
+        try {
+            // 发送到SillyTavern后端代理
+            const response = await fetch('/api/proxy/openai/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(proxyRequest)
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
             }
 
-            const fullPayload = buildModelPayload(promptText, historyItems);
+            const data = await response.json();
+            return data;
+        } catch (error) {
+            // 如果标准代理路径失败，尝试其他可能的路径
+            console.warn('标准代理路径失败，尝试备用路径:', error);
             
-            // === 核心调用 ===
-            const responseText = await sendToModel(fullPayload);
+            try {
+                // 尝试使用SillyTavern的通用API代理
+                const altResponse = await fetch('/api/openai/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        url: this.apiConfig.url,
+                        headers: {
+                            'Authorization': `Bearer ${this.apiConfig.key}`
+                        },
+                        body: requestBody
+                    })
+                });
 
-            const options = parseModelOptions(responseText);
-            renderOptionsToPanel(options);
-            
-            if (genStatus) genStatus.textContent = '完成';
+                if (!altResponse.ok) {
+                    throw new Error(`备用路径HTTP错误: ${altResponse.status}`);
+                }
 
-        } catch (err) {
-            console.error(err);
-            $("#sh-options").html(`<div class="sh-empty" style="color:#ff6b6b">生成错误: ${err.message}</div>`);
-            if (genStatus) genStatus.textContent = '失败';
+                return await altResponse.json();
+            } catch (altError) {
+                console.error('所有代理路径都失败:', altError);
+                throw new Error(`API调用失败: ${altError.message}`);
+            }
         }
-    });
+    }
 
-    $("#sh-apply-to-st").off().on("click", () => {
-        const preview = document.getElementById('sh-target-preview');
-        if (preview && preview.value) writeToSTInput(preview.value);
-    });
-    
-    $("#sh-clear-preview").off().on("click", () => {
-        $("#sh-target-preview").val("");
-    });
-}
-
-// -------------------------------------------------------
-// 4. 加载逻辑
-// -------------------------------------------------------
-
-function injectStyles() {
-    const link = document.createElement("link");
-    link.href = `${extensionFolderPath}/plugin.css`;
-    link.type = "text/css";
-    link.rel = "stylesheet";
-    document.head.appendChild(link);
-}
-
-async function loadStoryHelperUI() {
-    try {
-        const html = await $.get(`${extensionFolderPath}/plugin.html`);
-        if ($("#st-story-helper").length > 0) $("#st-story-helper").remove();
-        $("body").append(html);
+    // 更新选项区域
+    updateOptions(responseText) {
+        const optionsContainer = document.getElementById('sh-options');
+        optionsContainer.innerHTML = '';
         
-        const $panel = $("#st-story-helper");
-        $panel.css("display", "none");
+        // 简单地将响应文本按段落分割为选项
+        const paragraphs = responseText.split('\n').filter(p => p.trim().length > 0);
         
-        $("#sh-close").off().on("click", () => $panel.fadeOut(200));
-        if ($panel.draggable) $panel.draggable({ handle: ".sh-header", containment: "window" });
+        if (paragraphs.length === 0) {
+            optionsContainer.innerHTML = '<div class="sh-empty">无可用选项</div>';
+            return;
+        }
 
-        bindPanelEvents();
-        console.log(`[${extensionName}] UI 加载完成`);
-    } catch (err) {
-        console.error(`[${extensionName}] HTML 加载失败`, err);
+        paragraphs.forEach((paragraph, index) => {
+            const optionDiv = document.createElement('div');
+            optionDiv.className = 'sh-option';
+            optionDiv.textContent = paragraph.length > 100 ? paragraph.substring(0, 100) + '...' : paragraph;
+            optionDiv.title = paragraph;
+            
+            optionDiv.addEventListener('click', () => {
+                document.getElementById('sh-target-preview').value = paragraph;
+                // 高亮选中的选项
+                document.querySelectorAll('.sh-option').forEach(opt => {
+                    opt.style.background = 'rgba(255,255,255,0.05)';
+                });
+                optionDiv.style.background = 'rgba(111, 141, 246, 0.2)';
+            });
+            
+            optionsContainer.appendChild(optionDiv);
+        });
+    }
+
+    // 填入SillyTavern输入框
+    applyToST() {
+        if (!this.currentResponse) {
+            this.updateStatus('sh-last', '没有可填入的内容', 'warning');
+            return;
+        }
+
+        try {
+            // 尝试将内容填入SillyTavern的输入框
+            const inputBox = document.querySelector('#send_textarea') || 
+                           document.querySelector('.chat-input textarea') ||
+                           document.querySelector('textarea[name="send_text"]');
+            
+            if (inputBox) {
+                inputBox.value = this.currentResponse;
+                // 触发输入事件以更新UI
+                inputBox.dispatchEvent(new Event('input', { bubbles: true }));
+                inputBox.dispatchEvent(new Event('change', { bubbles: true }));
+                
+                this.updateStatus('sh-last', '已填入输入框', 'success');
+            } else {
+                this.updateStatus('sh-last', '未找到输入框', 'error');
+            }
+        } catch (error) {
+            this.updateStatus('sh-last', '填入失败: ' + error.message, 'error');
+        }
+    }
+
+    // 显示插件面板
+    show() {
+        document.getElementById('st-story-helper').style.display = 'flex';
+    }
+
+    // 隐藏插件面板
+    hide() {
+        document.getElementById('st-story-helper').style.display = 'none';
     }
 }
 
-function createToolbarButton() {
-    $("#sh-toggle-btn").remove();
-    const buttonHtml = `<div id="sh-toggle-btn" class="qr--button menu_button" title="剧情助手"><div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;"><svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M9 18h6M10 21h4M12 2a6 6 0 0 0-4 10c0 2 1 3 1 4h6c0-1 1-2 1-4a6 6 0 0 0-4-10z"></path></svg></div></div>`;
-    
-    let $target = $("#qr--bar");
-    if ($target.length === 0) {
-        $("#send_textarea").closest('#send_form').prepend('<div class="flex-container flexGap5" id="qr--bar"></div>');
-        $target = $("#qr--bar");
+// 初始化插件
+let storyHelper = null;
+
+// 等待SillyTavern环境就绪
+function initStoryHelper() {
+    if (storyHelper === null) {
+        storyHelper = new StoryHelperPlugin();
     }
-    $target.append(buttonHtml);
-
-    $(document).off("click", "#sh-toggle-btn").on("click", "#sh-toggle-btn", (e) => {
-        e.preventDefault();
-        const $panel = $("#st-story-helper");
-        if ($panel.is(":visible")) {
-            $panel.fadeOut(200);
-        } else {
-            $panel.css("display", "flex").hide().fadeIn(200);
-        }
-    });
+    
+    // 提供全局访问接口
+    window.StoryHelper = storyHelper;
 }
 
-// -------------------------------------------------------
-// 5. 启动循环 (确保 jQuery 已加载)
-// -------------------------------------------------------
-
-function waitForST() {
-    let checks = 0;
-    const interval = setInterval(() => {
-        checks++;
-        // 我们只需要 jQuery 存在，并且 DOM 解析完毕
-        if (window.jQuery && document.querySelector('#send_textarea')) {
-            clearInterval(interval);
-            console.log(`[${extensionName}] 系统就绪。`);
-            injectStyles();
-            loadStoryHelperUI();
-            createToolbarButton();
-        } else if (checks >= 30) {
-            clearInterval(interval);
-            console.log(`[${extensionName}] 超时，尝试强制启动。`);
-            injectStyles();
-            loadStoryHelperUI();
-            createToolbarButton();
-        }
-    }, 1000);
+// 如果SillyTavern环境已就绪，立即初始化
+if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    initStoryHelper();
+} else {
+    document.addEventListener('DOMContentLoaded', initStoryHelper);
 }
 
-// 使用 jQuery 的 document.ready 保证环境安全
-jQuery(() => waitForST());
+// 也可以通过ST的扩展机制初始化
+if (typeof window.SB !== 'undefined' && window.SB.extensions) {
+    window.SB.extensions.storyHelper = {
+        init: initStoryHelper,
+        getInstance: () => storyHelper
+    };
+}
