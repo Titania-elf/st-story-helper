@@ -1,51 +1,29 @@
-// index.js - 反代专用修复版
-// 专门解决 CORS 跨域和 CSRF 403 问题
+// index.js - 模仿原生行为版
+// 利用 ST 内置的 jQuery 直接调用后端接口，这是最“原生”的方式，肯定能通
 
 const extensionName = "st-story-helper";
 const LS_KEY = 'story-helper-prompt';
 
-// 自动获取插件路径
 const scriptPath = document.currentScript ? document.currentScript.src : import.meta.url;
 const extensionFolderPath = scriptPath.substring(0, scriptPath.lastIndexOf('/'));
 
-console.log(`[${extensionName}] 插件启动 (Proxy Fix Mode)`);
+console.log(`[${extensionName}] 插件启动 (Native jQuery Mode)`);
 
 // -------------------------------------------------------
-// 1. 核心生成逻辑 (通过 ST 后台转发)
+// 1. 核心生成逻辑
 // -------------------------------------------------------
 
-/**
- * 暴力获取 CSRF Token (这是解决 403 的关键)
- */
-function getCsrfToken() {
-    // 1. 尝试从全局变量获取 (ST 常用)
-    if (typeof window.csrfToken !== 'undefined') return window.csrfToken;
-    
-    // 2. 尝试从 Meta 标签获取 (新版 ST)
-    const meta = document.querySelector('meta[name="csrf-token"]');
-    if (meta && meta.content) return meta.content;
-    
-    // 3. 尝试从 Cookie 解析 (旧版 ST)
-    const match = document.cookie.match(new RegExp('(^| )X-CSRF-Token=([^;]+)'));
-    if (match) return match[2];
-
-    // 4. 尝试从 jQuery 全局配置获取
-    if (window.jQuery && window.jQuery.ajaxSettings && window.jQuery.ajaxSettings.headers) {
-        return window.jQuery.ajaxSettings.headers['X-CSRF-Token'];
-    }
-
-    console.warn(`[${extensionName}] 未找到 CSRF Token，请求可能会失败。`);
-    return '';
-}
-
-/**
- * 发送请求
- */
 async function sendToModel(fullPrompt) {
-    console.log(`[${extensionName}] 准备通过 ST 后台转发请求...`);
+    console.log(`[${extensionName}] 正在请求生成...`);
 
-    // 1. 组装最简参数
-    // quiet: true 告诉 ST "这是后台任务，用你现在配置好的 API 设置去跑，别问我参数"
+    // 1. 获取 CSRF Token (这是唯一的安全门槛)
+    // ST 通常把 token 放在全局变量或 meta 标签里
+    let token = '';
+    if (typeof window.csrfToken !== 'undefined') token = window.csrfToken;
+    else if (document.querySelector('meta[name="csrf-token"]')) token = document.querySelector('meta[name="csrf-token"]').content;
+    
+    // 2. 准备参数
+    // quiet: true 是核心，告诉 ST "别说话，悄悄帮我跑个提示词，别存进聊天记录"
     const payload = {
         prompt: fullPrompt,
         quiet: true,
@@ -55,104 +33,81 @@ async function sendToModel(fullPrompt) {
         use_world_info: false
     };
 
-    // 2. 获取 Token
-    const token = getCsrfToken();
-
-    // 3. 发送请求 (使用 fetch，手动带上凭证)
     try {
-        const response = await fetch('/api/generate', {
-            method: 'POST',
+        // 3. 使用 jQuery.ajax (核心！)
+        // SillyTavern 全局配置了 jQuery，它会自动携带 Cookie，解决 403 问题
+        const response = await $.ajax({
+            url: '/api/generate',
+            type: 'POST',
+            dataType: 'json',
+            contentType: 'application/json',
+            data: JSON.stringify(payload),
             headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': token
+                'X-CSRF-Token': token // 手动补全 Token，双重保险
             },
-            // 关键：include 确保带上 Cookie，否则反代模式下 ST 会认为你没登录
-            credentials: 'include', 
-            body: JSON.stringify(payload)
+            xhrFields: {
+                withCredentials: true // 强制带 Cookie
+            }
         });
 
-        // 处理 HTTP 错误
-        if (!response.ok) {
-            const errText = await response.text();
-            if (response.status === 403) {
-                throw new Error("403 禁止访问：CSRF 校验失败。请刷新页面重试。");
-            }
-            if (response.status === 500 || response.status === 400) {
-                // 尝试解析错误里的具体信息
-                try {
-                    const errJson = JSON.parse(errText);
-                    if (errJson.error && errJson.error.message) {
-                        throw new Error(`API 报错: ${errJson.error.message}`);
-                    }
-                } catch(e) {}
-                throw new Error(`反代服务器报错 (${response.status})。请检查 API 连接。`);
-            }
-            throw new Error(`请求失败: ${response.status} ${response.statusText}`);
+        // 4. 解析结果 (ST 后端会帮我们处理好格式)
+        // 不管是 Chat 还是 Text 模式，ST 后端通常会标准化返回
+        
+        // 情况 A: 标准 Text 格式
+        if (response.results && response.results[0]) {
+            return response.results[0].text;
+        }
+        
+        // 情况 B: 某些 Chat 模式透传
+        if (response.choices && response.choices[0]) {
+            return response.choices[0].message?.content || response.choices[0].text;
         }
 
-        // 4. 解析结果
-        const data = await response.json();
-        console.log(`[${extensionName}] 收到数据:`, data);
+        // 情况 C: 根目录 text
+        if (response.text) return response.text;
 
-        // 兼容各种反代的返回格式
-        // 情况 A: 文本补全
-        if (data.results && data.results[0] && data.results[0].text) {
-            return data.results[0].text;
-        }
-        // 情况 B: 聊天补全 (OpenAI 格式)
-        if (data.choices && data.choices[0]) {
-            if (data.choices[0].message && data.choices[0].message.content) {
-                return data.choices[0].message.content;
-            }
-            if (data.choices[0].text) {
-                return data.choices[0].text;
-            }
-        }
-        // 情况 C: 简单对象
-        if (data.text) return data.text;
+        // 情况 D: 纯文本
+        if (typeof response === 'string') return response;
 
-        // 情况 D: 纯字符串
-        if (typeof data === 'string') return data;
-
-        return JSON.stringify(data);
+        console.warn("未知返回格式:", response);
+        return JSON.stringify(response);
 
     } catch (err) {
-        console.error(err);
-        throw err;
+        console.error("生成失败:", err);
+        
+        // 解析错误信息给用户看
+        let msg = "未知错误";
+        if (err.responseJSON && err.responseJSON.error) {
+            msg = err.responseJSON.error.message || JSON.stringify(err.responseJSON.error);
+        } else if (err.statusText) {
+            msg = err.statusText;
+        }
+        
+        if (err.status === 403) msg += " (权限不足，请刷新页面)";
+        if (err.status === 500) msg += " (反代/模型端报错)";
+        
+        throw new Error(msg);
     }
 }
 
 // -------------------------------------------------------
-// 2. 辅助工具 (无变化)
+// 2. 辅助工具
 // -------------------------------------------------------
 
 function escapeHtml(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function safeText(node) {
-    return node ? (node.textContent || node.innerText || '').trim() : '';
-}
-
 function findSTInput() {
-    // 暴力查找
-    const candidates = [
-        '#send_textarea',
-        'textarea[aria-label="Message"]',
-        '.composer textarea',
-        '#chat_input_form textarea'
-    ];
-    for (const sel of candidates) {
-        const el = document.querySelector(sel);
-        if (el) return el;
-    }
-    return null;
+    return document.querySelector('#send_textarea') || 
+           document.querySelector('textarea[aria-label="Message"]') ||
+           document.querySelector('.composer textarea');
 }
 
 function writeToSTInput(text) {
     const stInput = findSTInput();
     if (stInput) {
-        // React/Vue 兼容性写入
+        // 模拟用户输入，触发 React 更新
         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
         nativeInputValueSetter.call(stInput, text);
         stInput.dispatchEvent(new Event('input', { bubbles: true }));
@@ -166,21 +121,27 @@ function writeToSTInput(text) {
 function extractRecentChatHistory(maxItems = 20) {
     const chatContainer = document.querySelector('#chat');
     if (!chatContainer) return [];
-    const messageNodes = Array.from(chatContainer.querySelectorAll('.mes'));
+    
+    // 获取可见消息
+    const messageNodes = Array.from(chatContainer.querySelectorAll('.mes')).filter(n => n.style.display !== 'none');
     const results = [];
+
     for (let i = messageNodes.length - 1; i >= 0 && results.length < maxItems; i--) {
         const node = messageNodes[i];
-        if (node.style.display === 'none') continue;
         let role = 'user';
         if (node.getAttribute('is_user') === 'false' || node.classList.contains('not_user')) {
             role = 'assistant';
         }
+
         const textNode = node.querySelector('.mes_text');
         if (textNode) {
+            // 克隆节点以获取纯文本
             const clone = textNode.cloneNode(true);
             clone.querySelectorAll('.mes_buttons, .timestamp, .mes_edit_clone, .conf_div').forEach(b => b.remove());
-            let text = safeText(clone);
-            text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+            // 简单处理 <br> 为换行
+            clone.innerHTML = clone.innerHTML.replace(/<br\s*\/?>/gi, '\n');
+            const text = clone.innerText.trim();
+            
             if (text) results.push({ role, text });
         }
     }
@@ -189,15 +150,17 @@ function extractRecentChatHistory(maxItems = 20) {
 
 function buildModelPayload(userPrompt, historyItems) {
     const historyText = historyItems.map(it => `${it.role.toUpperCase()}: ${it.text}`).join('\n');
+    
+    // Prompt 模板
     return `
 [Context]
 ${historyText}
 
-[Instruction]
+[System Instruction]
 ${userPrompt.trim()}
 
 [Format]
-Output 4 distinct options numbered 1 to 4.
+Output exactly 4 distinct plot options numbered 1 to 4.
 1. ...
 2. ...
 3. ...
@@ -207,11 +170,17 @@ Output 4 distinct options numbered 1 to 4.
 
 function parseModelOptions(text) {
     if (!text) return [];
+    
+    // 清理 DeepSeek 思维链
     text = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
     const items = [];
     let current = null;
+    
+    // 匹配编号 1. 1) 1、
     const indexRegex = /^([①1-9]+)[\.\)\、\s]+(.*)$/;
+
     for (const line of lines) {
         const m = line.match(indexRegex);
         if (m) {
@@ -222,7 +191,10 @@ function parseModelOptions(text) {
         }
     }
     if (current) items.push(current.trim());
+
+    // 容错：如果没有正则匹配到，按段落分
     if (items.length < 2) return text.split(/\n\s*\n/).filter(p => p.length > 5).slice(0, 4);
+    
     return items.slice(0, 4);
 }
 
@@ -234,14 +206,17 @@ function renderOptionsToPanel(optionTexts) {
     const optionsWrap = document.getElementById('sh-options');
     if (!optionsWrap) return;
     optionsWrap.innerHTML = '';
+    
     if (!optionTexts || optionTexts.length === 0) {
         optionsWrap.innerHTML = '<div class="sh-empty">未能解析出选项。</div>';
         return;
     }
+
     optionTexts.forEach((txt, idx) => {
         const btn = document.createElement('div');
         btn.className = 'sh-option';
         btn.innerHTML = `<strong style="color:var(--sh-accent-2);margin-right:6px;">${idx + 1}.</strong>${escapeHtml(txt)}`;
+        
         btn.addEventListener('click', () => {
             const success = writeToSTInput(txt);
             const preview = document.getElementById('sh-target-preview');
@@ -256,16 +231,17 @@ function bindPanelEvents() {
     const ctxEl = document.getElementById('sh-context');
     const genStatus = document.getElementById('sh-gen-status');
     const savedPrompt = localStorage.getItem(LS_KEY);
+    
     if (savedPrompt && promptEl) promptEl.value = savedPrompt;
 
     $("#sh-save-prompt").off().on("click", () => {
         if (promptEl) {
             localStorage.setItem(LS_KEY, promptEl.value);
-            alert("已保存");
+            alert("提示词已保存");
         }
     });
 
-    // 隐藏设置按钮，因为现在走 ST 内部
+    // 隐藏之前的设置按钮，因为现在自动使用 ST 连接
     $("#sh-settings-toggle").hide();
 
     $("#sh-load-sample").off().on("click", () => {
@@ -273,28 +249,37 @@ function bindPanelEvents() {
     });
 
     $("#sh-fill-sample").off().on("click", () => {
-        if (ctxEl) ctxEl.value = "User: 开门。\nAssistant: 里面很黑。";
+        const history = extractRecentChatHistory(5);
+        if (ctxEl) ctxEl.value = history.map(h => `${h.role}: ${h.text}`).join('\n') || "User: 开门。\nAssistant: 里面很黑。";
     });
 
+    // === 生成按钮 ===
     $("#sh-generate").off().on("click", async () => {
         const promptText = promptEl ? promptEl.value.trim() : '';
-        if (!promptText) {
-            alert('请先填写提示词！');
-            return;
-        }
+        if (!promptText) return alert('请先填写提示词！');
+
         if (genStatus) genStatus.textContent = '请求中...';
         $("#sh-options").html('<div class="sh-empty"><span class="sh-spinner">⏳</span> 正在生成...</div>');
+
         try {
             let historyItems = [];
             const manualCtx = ctxEl ? ctxEl.value.trim() : '';
-            if (manualCtx) historyItems = [{ role: 'user', text: manualCtx }];
-            else historyItems = extractRecentChatHistory(15);
+            if (manualCtx) {
+                historyItems = [{ role: 'user', text: manualCtx }];
+            } else {
+                historyItems = extractRecentChatHistory(15);
+            }
 
             const fullPayload = buildModelPayload(promptText, historyItems);
+            
+            // 调用模型
             const responseText = await sendToModel(fullPayload);
+
             const options = parseModelOptions(responseText);
             renderOptionsToPanel(options);
+            
             if (genStatus) genStatus.textContent = '完成';
+
         } catch (err) {
             console.error(err);
             $("#sh-options").html(`<div class="sh-empty" style="color:#ff6b6b">错误: ${err.message}</div>`);
@@ -313,7 +298,7 @@ function bindPanelEvents() {
 }
 
 // -------------------------------------------------------
-// 4. 加载
+// 4. 加载逻辑
 // -------------------------------------------------------
 
 function injectStyles() {
@@ -329,23 +314,31 @@ async function loadStoryHelperUI() {
         const html = await $.get(`${extensionFolderPath}/plugin.html`);
         if ($("#st-story-helper").length > 0) $("#st-story-helper").remove();
         $("body").append(html);
+        
         const $panel = $("#st-story-helper");
         $panel.css("display", "none");
+        
         $("#sh-close").off().on("click", () => $panel.fadeOut(200));
         if ($panel.draggable) $panel.draggable({ handle: ".sh-header", containment: "window" });
+
         bindPanelEvents();
-    } catch (err) { console.error(err); }
+        console.log(`[${extensionName}] UI 加载完成`);
+    } catch (err) {
+        console.error(`[${extensionName}] HTML 加载失败`, err);
+    }
 }
 
 function createToolbarButton() {
     $("#sh-toggle-btn").remove();
     const buttonHtml = `<div id="sh-toggle-btn" class="qr--button menu_button" title="剧情助手"><div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;"><svg viewBox="0 0 24 24" style="width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;"><path d="M9 18h6M10 21h4M12 2a6 6 0 0 0-4 10c0 2 1 3 1 4h6c0-1 1-2 1-4a6 6 0 0 0-4-10z"></path></svg></div></div>`;
+    
     let $target = $("#qr--bar");
     if ($target.length === 0) {
         $("#send_textarea").closest('#send_form').prepend('<div class="flex-container flexGap5" id="qr--bar"></div>');
         $target = $("#qr--bar");
     }
     $target.append(buttonHtml);
+
     $(document).off("click", "#sh-toggle-btn").on("click", "#sh-toggle-btn", (e) => {
         e.preventDefault();
         const $panel = $("#st-story-helper");
@@ -354,19 +347,25 @@ function createToolbarButton() {
     });
 }
 
+// -------------------------------------------------------
+// 5. 启动
+// -------------------------------------------------------
+
 function waitForST() {
     let checks = 0;
     const interval = setInterval(() => {
         checks++;
-        // 只要 ST 变量存在即可，不需要等待完全就绪，我们自己发请求
-        if (window.SillyTavern || window.jQuery) {
+        // 我们只需要 jQuery 和 ST 的基本变量存在即可
+        // 不再需要等待 api 上下文，因为我们走的是 http 接口
+        if (window.jQuery && window.SillyTavern) {
             clearInterval(interval);
-            console.log(`[${extensionName}] 就绪。`);
+            console.log(`[${extensionName}] 系统就绪。`);
             injectStyles();
             loadStoryHelperUI();
             createToolbarButton();
         } else if (checks >= 30) {
             clearInterval(interval);
+            console.log(`[${extensionName}] 超时，尝试强制启动。`);
             injectStyles();
             loadStoryHelperUI();
             createToolbarButton();
