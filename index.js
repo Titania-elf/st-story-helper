@@ -1,4 +1,4 @@
-// index.js - 独立 API 请求版 (Select 下拉框适配版)
+// index.js - 独立 API 请求版 (通用 Key 兼容版)
 
 const extensionName = "st-story-helper";
 const LS_KEY_PROMPT = 'sh_prompt';
@@ -9,7 +9,7 @@ const LS_KEY_MODEL = 'sh_api_model';
 const scriptPath = document.currentScript ? document.currentScript.src : import.meta.url;
 const extensionFolderPath = scriptPath.substring(0, scriptPath.lastIndexOf('/'));
 
-console.log(`[${extensionName}] 插件启动 (Select UI Mode)`);
+console.log(`[${extensionName}] 插件启动 (Any-Key Support Mode)`);
 
 // -------------------------------------------------------
 // 1. 核心生成逻辑
@@ -17,11 +17,13 @@ console.log(`[${extensionName}] 插件启动 (Select UI Mode)`);
 
 async function sendToModel(fullPrompt) {
     const apiUrl = localStorage.getItem(LS_KEY_API_URL);
-    const apiKey = localStorage.getItem(LS_KEY_API_KEY);
+    // 获取 Key 并去除首尾空格
+    const apiKey = (localStorage.getItem(LS_KEY_API_KEY) || '').trim();
     const model = localStorage.getItem(LS_KEY_MODEL);
 
     if (!apiUrl) throw new Error("请先点击右上角 ⚙️ 设置 API 地址！");
 
+    // 智能补全 Chat 路径
     let endpoint = apiUrl;
     if (!endpoint.endsWith('/chat/completions') && !endpoint.endsWith('/generate')) {
          if (endpoint.endsWith('/')) endpoint += 'chat/completions';
@@ -41,7 +43,13 @@ async function sendToModel(fullPrompt) {
     console.log(`[${extensionName}] 发送请求到: ${endpoint}`);
 
     const headers = { "Content-Type": "application/json" };
-    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+    
+    // === 关键：鉴权头处理 ===
+    if (apiKey) {
+        // 99% 的反代（OneAPI, NewAPI, OpenAI）都遵循 Bearer Token 标准
+        // 无论 key 是 sk-xxx 还是 nk-xxx 还是 123456，都这样发送
+        headers["Authorization"] = `Bearer ${apiKey}`;
+    }
 
     const response = await fetch(endpoint, {
         method: "POST",
@@ -65,14 +73,13 @@ async function sendToModel(fullPrompt) {
 }
 
 // -------------------------------------------------------
-// 2. 获取模型列表功能 (适配 Select)
+// 2. 获取模型列表功能
 // -------------------------------------------------------
 
 async function fetchModelList() {
     const apiUrl = $("#sh-api-url").val().trim();
     const apiKey = $("#sh-api-key").val().trim();
     const refreshBtn = $("#sh-refresh-models");
-    // 改动：直接操作 select 元素
     const selectBox = $("#sh-api-model");
 
     if (!apiUrl) return alert("请先填写 API 地址！");
@@ -114,19 +121,17 @@ async function fetchModelList() {
 
         models.sort();
         
-        // 改动：清空 select 并重新填充 option
         selectBox.empty();
         models.forEach(m => {
             selectBox.append(`<option value="${m}">${m}</option>`);
         });
 
-        // 尝试保持当前选择，或者选中第一个
+        // 尝试保持当前选择
         const currentModel = localStorage.getItem(LS_KEY_MODEL);
         if (currentModel && models.includes(currentModel)) {
             selectBox.val(currentModel);
         } else {
             selectBox.val(models[0]);
-            // 自动保存新选中的模型
             localStorage.setItem(LS_KEY_MODEL, models[0]);
         }
 
@@ -134,14 +139,14 @@ async function fetchModelList() {
 
     } catch (err) {
         console.error("获取模型失败", err);
-        alert(`获取失败: ${err.message}\n请检查 API 地址是否正确。`);
+        alert(`获取失败: ${err.message}\n如果无法获取列表，请手动在下拉框代码中添加选项，或者直接使用默认模型。`);
     } finally {
         refreshBtn.text("↻").prop("disabled", false);
     }
 }
 
 // -------------------------------------------------------
-// 3. 辅助工具
+// 3. 辅助工具 (无变化)
 // -------------------------------------------------------
 
 function escapeHtml(s) {
@@ -262,11 +267,9 @@ function bindPanelEvents() {
     $("#sh-api-url").val(localStorage.getItem(LS_KEY_API_URL) || '');
     $("#sh-api-key").val(localStorage.getItem(LS_KEY_API_KEY) || '');
     
-    // 改动：初始化 Select
+    // 初始化 Select
     const savedModel = localStorage.getItem(LS_KEY_MODEL) || 'gpt-3.5-turbo';
     const selectBox = $("#sh-api-model");
-    
-    // 初始化时，不管列表有没有获取，先保证有一个选项是当前的保存值
     selectBox.empty(); 
     selectBox.append(`<option value="${savedModel}">${savedModel}</option>`);
     selectBox.val(savedModel);
@@ -279,7 +282,6 @@ function bindPanelEvents() {
         fetchModelList();
     });
 
-    // 改动：监听 select 变化，实时保存模型选择
     $("#sh-api-model").off().on("change", function() {
         localStorage.setItem(LS_KEY_MODEL, $(this).val());
     });
@@ -287,7 +289,7 @@ function bindPanelEvents() {
     $("#sh-save-settings").off().on("click", () => {
         localStorage.setItem(LS_KEY_API_URL, $("#sh-api-url").val().trim());
         localStorage.setItem(LS_KEY_API_KEY, $("#sh-api-key").val().trim());
-        localStorage.setItem(LS_KEY_MODEL, $("#sh-api-model").val().trim()); // 这里的 .val() 对 select 也有效
+        localStorage.setItem(LS_KEY_MODEL, $("#sh-api-model").val().trim());
         alert("设置已保存！");
         $("#sh-settings-panel").slideUp(200);
     });
